@@ -12,56 +12,152 @@ concurrency:
 
 jobs:
   android_build:
-    name: "Android / Build"
+    name: "Android / Build APK"
     runs-on: ubuntu-latest
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
+
       - name: Install Go
         uses: actions/setup-go@v5
         with:
           go-version: "1.23.x"
+
       - name: Setup Android SDK
         uses: android-actions/setup-android@v3
         with:
           cmdline-tools-version: 8512546
+          # 补充安卓构建所需的平台和工具
+          api-levels: 33
+          build-tools: 33.0.1
+
       - name: Setup Java
         uses: actions/setup-java@v4
         with:
           java-version: "11"
           distribution: "adopt"
+
       - name: NDK Cache
         id: ndk-cache
         uses: actions/cache@v4
         with:
           path: /usr/local/lib/android/sdk/ndk
           key: ndk-cache-23.1.7779620
+
       - name: Setup NDK
         run: /usr/local/lib/android/sdk/cmdline-tools/7.0/bin/sdkmanager --install "ndk;23.1.7779620"
-      - name: install gomobile
+
+      - name: Install gomobile
         run: go install golang.org/x/mobile/cmd/gomobile@v0.0.0-20240404231514-09dbf07665ed
-      - name: gomobile init
+
+      - name: Gomobile init
         run: gomobile init
-      - name: build android netbird lib
-        run: PATH=$PATH:$(go env GOPATH) gomobile bind -o $GITHUB_WORKSPACE/netbird.aar -javapkg=io.netbird.gomobile -ldflags="-checklinkname=0 -X golang.zx2c4.com/wireguard/ipc.socketDirectory=/data/data/io.netbird.client/cache/wireguard -X github.com/netbirdio/netbird/version.version=buildtest"  $GITHUB_WORKSPACE/client/android
+
+      - name: Build Android NetBird AAR 库
+        run: |
+          PATH=$PATH:$(go env GOPATH) 
+          gomobile bind \
+            -o $GITHUB_WORKSPACE/netbird.aar \
+            -javapkg=io.netbird.gomobile \
+            -ldflags="-checklinkname=0 \
+              -X golang.zx2c4.com/wireguard/ipc.socketDirectory=/data/data/io.netbird.client/cache/wireguard \
+              -X github.com/netbirdio/netbird/version.version=buildtest" \
+            $GITHUB_WORKSPACE/client/android
         env:
           CGO_ENABLED: 0
           ANDROID_NDK_HOME: /usr/local/lib/android/sdk/ndk/23.1.7779620
+
+      # 新增步骤：将 AAR 库复制到安卓原生工程
+      - name: Copy AAR to Android project
+        run: |
+          # 假设安卓原生工程路径为 client/mobile/android（根据实际路径调整）
+          ANDROID_PROJECT_DIR="$GITHUB_WORKSPACE/client/mobile/android"
+          # 创建 libs 目录（若不存在）
+          mkdir -p "$ANDROID_PROJECT_DIR/app/libs"
+          # 复制生成的 AAR 到工程的 libs 目录
+          cp "$GITHUB_WORKSPACE/netbird.aar" "$ANDROID_PROJECT_DIR/app/libs/"
+
+      # 新增步骤：编译安卓 APK（调试版，无需签名即可安装到调试设备）
+      - name: Build Android Debug APK
+        run: |
+          ANDROID_PROJECT_DIR="$GITHUB_WORKSPACE/client/mobile/android"
+          cd "$ANDROID_PROJECT_DIR"
+          # 授予 Gradle 执行权限
+          chmod +x ./gradlew
+          # 编译调试版 APK（输出路径：app/build/outputs/apk/debug/）
+          ./gradlew app:assembleDebug
+        env:
+          ANDROID_NDK_HOME: /usr/local/lib/android/sdk/ndk/23.1.7779620
+
+      # （可选）新增步骤：编译签名发布版 APK（需提前配置签名信息）
+      - name: Build Android Release APK (Signed)
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        run: |
+          ANDROID_PROJECT_DIR="$GITHUB_WORKSPACE/client/mobile/android"
+          cd "$ANDROID_PROJECT_DIR"
+          chmod +x ./gradlew
+          # 编译发布版 APK（需在 build.gradle 中配置签名引用以下环境变量）
+          ./gradlew app:assembleRelease
+        env:
+          ANDROID_NDK_HOME: /usr/local/lib/android/sdk/ndk/23.1.7779620
+          # 从 GitHub Secrets 读取签名信息（需提前在仓库设置中添加）
+          KEY_STORE_PATH: ${{ secrets.ANDROID_KEY_STORE_PATH }}
+          KEY_STORE_PASSWORD: ${{ secrets.ANDROID_KEY_STORE_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          KEY_ALIAS_PASSWORD: ${{ secrets.ANDROID_KEY_ALIAS_PASSWORD }}
+
+      # 新增步骤：上传调试版 APK 产物
+      - name: Upload Debug APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: android-debug-apk
+          path: |
+            ${{ github.workspace }}/client/mobile/android/app/build/outputs/apk/debug/*.apk
+          retention-days: 7
+
+      # （可选）上传发布版 APK 产物
+      - name: Upload Release APK
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        uses: actions/upload-artifact@v4
+        with:
+          name: android-release-apk
+          path: |
+            ${{ github.workspace }}/client/mobile/android/app/build/outputs/apk/release/*.apk
+          retention-days: 30
+
   ios_build:
     name: "iOS / Build"
     runs-on: macos-latest
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
+
       - name: Install Go
         uses: actions/setup-go@v5
         with:
           go-version: "1.23.x"
-      - name: install gomobile
+
+      - name: Install gomobile
         run: go install golang.org/x/mobile/cmd/gomobile@v0.0.0-20240404231514-09dbf07665ed
-      - name: gomobile init
+
+      - name: Gomobile init
         run: gomobile init
-      - name: build iOS netbird lib
-        run: PATH=$PATH:$(go env GOPATH) gomobile bind -target=ios -bundleid=io.netbird.framework -ldflags="-X github.com/netbirdio/netbird/version.version=buildtest" -o ./NetBirdSDK.xcframework ./client/ios/NetBirdSDK
+
+      - name: Build iOS NetBird framework
+        run: |
+          PATH=$PATH:$(go env GOPATH) 
+          gomobile bind \
+            -target=ios \
+            -bundleid=io.netbird.framework \
+            -ldflags="-X github.com/netbirdio/netbird/version.version=buildtest" \
+            -o ./NetBirdSDK.xcframework \
+            ./client/ios/NetBirdSDK
         env:
           CGO_ENABLED: 0
+
+      - name: Upload iOS Framework
+        uses: actions/upload-artifact@v4
+        with:
+          name: ios-framework
+          path: ./NetBirdSDK.xcframework
+          retention-days: 7
